@@ -9,9 +9,9 @@ const app = express();
 const PORT = 3000;
 
 const MAX_ATTEMPTS = 5;
-const COOLDOWN_MS = 30 * 60 * 1000;
+const COOLDOWN_MS = 60 * 60 * 1000; // @note 1 hour lockout
 
-const dbUrl = process.env.DATABASE_URL || 'mysql://root:password@localhost:3306/growtopia';
+const dbUrl = process.env.DATABASE_URL || 'mysql://root:password@localhost:3306/gurotopia';
 const db = new SQL(dbUrl);
 
 const ipAttempts = new Map<string, { count: number; blockedUntil: number }>();
@@ -59,7 +59,7 @@ function recordFailedAttempt(clientIp: string): number {
 
   if (record.count >= MAX_ATTEMPTS) {
     record.blockedUntil = now + COOLDOWN_MS;
-    console.log(`[BLOCKED] IP ${clientIp} blocked for 30 minutes`);
+    console.log(`[BLOCKED] IP ${clientIp} blocked for 1 hour`);
   }
 
   ipAttempts.set(clientIp, record);
@@ -145,9 +145,9 @@ app.all(
 
     const { blocked, remaining } = checkIpBlocked(clientIp);
     if (blocked) {
-      // generate error HTML directly
+      // @note generate error html directly
       const clientData = '';
-      const errorMessage = 'Login attempts exhausted from your IP, Please try again later after 30 mins';
+      const errorMessage = 'Login attempts exhausted from your IP, Please try again later after 1 hour';
       const templatePath = path.join(process.cwd(), 'template', 'dashboard.html');
       const templateContent = fs.readFileSync(templatePath, 'utf-8');
       const errorHtml = `<div class="text-danger text-danger-wrapper"><ul><li>${errorMessage}</li></ul></div>`;
@@ -161,14 +161,75 @@ app.all(
     try {
       const formData = req.body as Record<string, string>;
       const email = formData.email;
-
-      if (email) {
-        return;
-      }
-
       const _token = formData._token;
       const growId = formData.growId;
       const password = formData.password;
+
+      // @note registration flow when email is provided
+      if (email) {
+        const confirmPassword = formData.password_confirmation;
+        const clientData = btoa(growId || '');
+        const templatePath = path.join(process.cwd(), 'template', 'dashboard.html');
+        const templateContent = fs.readFileSync(templatePath, 'utf-8');
+
+        if (!growId || !password) {
+          const errorMessage = 'Missing GrowID or password for registration.';
+          const errorHtml = `<div class="text-danger text-danger-wrapper"><ul><li>${errorMessage}</li></ul></div>`;
+          let htmlContent = templateContent.replace('{{ data }}', Buffer.from(clientData).toString('base64'));
+          htmlContent = htmlContent.replace('<div class="row div-content-center">', `${errorHtml}<div class="row div-content-center">`);
+          res.setHeader('Content-Type', 'text/html');
+          res.send(htmlContent);
+          return;
+        }
+
+        if (confirmPassword && password !== confirmPassword) {
+          const errorMessage = 'Passwords do not match.';
+          const errorHtml = `<div class="text-danger text-danger-wrapper"><ul><li>${errorMessage}</li></ul></div>`;
+          let htmlContent = templateContent.replace('{{ data }}', Buffer.from(clientData).toString('base64'));
+          htmlContent = htmlContent.replace('<div class="row div-content-center">', `${errorHtml}<div class="row div-content-center">`);
+          res.setHeader('Content-Type', 'text/html');
+          res.send(htmlContent);
+          return;
+        }
+
+        const existing = await db`SELECT uid FROM peer WHERE growid = ${growId} LIMIT 1`;
+        if (existing.length > 0) {
+          const errorMessage = `GrowID "${growId}" is already taken. Please choose another name.`;
+          const errorHtml = `<div class="text-danger text-danger-wrapper"><ul><li>${errorMessage}</li></ul></div>`;
+          let htmlContent = templateContent.replace('{{ data }}', Buffer.from(clientData).toString('base64'));
+          htmlContent = htmlContent.replace('<div class="row div-content-center">', `${errorHtml}<div class="row div-content-center">`);
+          res.setHeader('Content-Type', 'text/html');
+          res.send(htmlContent);
+          return;
+        }
+
+        // @note starter inventory: slot_size 16, 3 slots (fist: 18, wrench: 32, my first wl: 9640)
+        const initialInventory = Buffer.from([
+          0x10, 0x00, 0x00, 0x00,
+          0x03, 0x00,
+          0x12, 0x00, 0x01, 0x00,
+          0x20, 0x00, 0x01, 0x00,
+          0xa8, 0x25, 0x01, 0x00,
+        ]);
+
+        await db`INSERT INTO peer (growid, password, inventory) VALUES (${growId}, ${password}, ${initialInventory})`;
+        resetAttempts(clientIp);
+
+        const token = Buffer.from(
+          `_token=${_token}&growId=${growId}&password=${password}&reg=1`,
+        ).toString('base64');
+
+        res.send(
+          JSON.stringify({
+            status: 'success',
+            message: 'Account Created and Validated.',
+            token,
+            url: '',
+            accountType: 'growtopia',
+          }),
+        );
+        return;
+      }
 
       if (!growId || !password) {
         res.status(200).json({
@@ -182,9 +243,11 @@ app.all(
 
       if (rows.length === 0) {
         const attemptsLeft = recordFailedAttempt(clientIp);
-        // generate error HTML directly
+        // @note generate error html directly
         const clientData = btoa(`${growId}`);
-        const errorMessage = `Account credentials missmatched. You have ${attemptsLeft} attempt(s) left.`;
+        const errorMessage = attemptsLeft > 0
+          ? `Account credentials missmatched. You have ${attemptsLeft} attempt(s) left.`
+          : 'Login attempts exhausted from your IP, Please try again later after 1 hour';
         const templatePath = path.join(process.cwd(), 'template', 'dashboard.html');
         const templateContent = fs.readFileSync(templatePath, 'utf-8');
         const errorHtml = `<div class="text-danger text-danger-wrapper"><ul><li>${errorMessage}</li></ul></div>`;
@@ -198,9 +261,11 @@ app.all(
       const user = rows[0];
       if (user.password !== password) {
         const attemptsLeft = recordFailedAttempt(clientIp);
-        // generate error HTML directly
+        // @note generate error html directly
         const clientData = btoa(`${growId}`);
-        const errorMessage = `Account credentials missmatched. You have ${attemptsLeft} attempt(s) left.`;
+        const errorMessage = attemptsLeft > 0
+          ? `Account credentials missmatched. You have ${attemptsLeft} attempt(s) left.`
+          : 'Login attempts exhausted from your IP, Please try again later after 1 hour';
         const templatePath = path.join(process.cwd(), 'template', 'dashboard.html');
         const templateContent = fs.readFileSync(templatePath, 'utf-8');
         const errorHtml = `<div class="text-danger text-danger-wrapper"><ul><li>${errorMessage}</li></ul></div>`;
@@ -323,6 +388,21 @@ app.all(
       let decodedRefreshToken = Buffer.from(refreshToken, 'base64').toString(
         'utf-8',
       );
+
+      // @note sync credentials check with db
+      const tokenParams = new URLSearchParams(decodedRefreshToken);
+      const tokenGrowId = tokenParams.get('growId');
+      const tokenPassword = tokenParams.get('password');
+      if (tokenGrowId && tokenPassword) {
+        const rows = await db`SELECT password FROM peer WHERE growid = ${tokenGrowId} LIMIT 1`;
+        if (rows.length === 0 || rows[0].password !== tokenPassword) {
+          res.status(200).json({
+            status: 'error',
+            message: 'Invalid credentials in token',
+          });
+          return;
+        }
+      }
 
       // @note remove &reg=0/1 from decodedRefreshToken if available
       if (decodedRefreshToken.includes('&reg=0')) {
