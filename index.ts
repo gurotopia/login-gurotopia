@@ -203,16 +203,6 @@ app.all(
           return;
         }
 
-        // @note starter inventory: slot_size 16, 3 slots (fist: 18, wrench: 32, my first wl: 9640)
-        const initialInventory = Buffer.from([
-          0x10, 0x00, 0x00, 0x00,
-          0x03, 0x00,
-          0x12, 0x00, 0x01, 0x00,
-          0x20, 0x00, 0x01, 0x00,
-          0xa8, 0x25, 0x01, 0x00,
-        ]);
-
-        await db`INSERT INTO peer (growid, password, inventory) VALUES (${growId}, ${password}, ${initialInventory})`;
         resetAttempts(clientIp);
 
         const token = Buffer.from(
@@ -393,22 +383,31 @@ app.all(
       const tokenParams = new URLSearchParams(decodedRefreshToken);
       const tokenGrowId = tokenParams.get('growId');
       const tokenPassword = tokenParams.get('password');
-      if (tokenGrowId && tokenPassword) {
+      const isReg = tokenParams.get('reg') === '1';
+
+      if (tokenGrowId) {
         const rows = await db`SELECT password FROM peer WHERE growid = ${tokenGrowId} LIMIT 1`;
-        if (rows.length === 0 || rows[0].password !== tokenPassword) {
-          res.status(200).json({
-            status: 'error',
-            message: 'Invalid credentials in token',
-          });
-          return;
+        if (isReg) {
+          if (rows.length > 0) {
+            res.status(200).json({
+              status: 'error',
+              message: 'GrowID is already taken',
+            });
+            return;
+          }
+        } else if (tokenPassword) {
+          if (rows.length === 0 || rows[0].password !== tokenPassword) {
+            res.status(200).json({
+              status: 'error',
+              message: 'Invalid credentials in token',
+            });
+            return;
+          }
         }
       }
 
-      // @note remove &reg=0/1 from decodedRefreshToken if available
-      if (decodedRefreshToken.includes('&reg=0')) {
+      if (!isReg && decodedRefreshToken.includes('&reg=0')) {
         decodedRefreshToken = decodedRefreshToken.replace('&reg=0', '');
-      } else if (decodedRefreshToken.includes('&reg=1')) {
-        decodedRefreshToken = decodedRefreshToken.replace('&reg=1', '');
       }
 
       const token = Buffer.from(
